@@ -344,19 +344,32 @@ async def scrape_google_maps(query, max_places=None, lang="en", headless=True): 
                     '--disable-setuid-sandbox',
                 ]
             ) # Added await
+            
+            # CHANGE: Anti-bot hardening - realistic browser context
             context = await browser.new_context( # Added await
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                viewport={'width': 1365, 'height': 768},  # Realistic viewport
+                locale=lang,
+                timezone_id='America/New_York',  # Set realistic timezone
                 java_script_enabled=True,
                 accept_downloads=False,
-                # Consider setting viewport, locale, timezone if needed
-                locale=lang,
+                permissions=[],  # No special permissions
             )
+            
             page = await context.new_page() # Added await
             if not page:
                 await browser.close() # Close browser before raising
                 raise Exception("Failed to create a new browser page (context.new_page() returned None).")
-            # Removed problematic: await page.set_default_timeout(DEFAULT_TIMEOUT)
-            # Removed associated debug prints
+            
+            # CHANGE: Block heavy resources to reduce load and avoid detection
+            async def route_handler(route):
+                resource_type = route.request.resource_type
+                if resource_type in ["image", "media", "font"]:
+                    await route.abort()
+                else:
+                    await route.continue_()
+            
+            await page.route("**/*", route_handler)
 
             search_url = create_search_url(query, lang)
             print(f"Navigating to search URL: {search_url}")

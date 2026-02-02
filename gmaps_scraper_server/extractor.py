@@ -325,245 +325,236 @@ def extract_place_data(html_content):
     return place_details if place_details else None
 
 
-# --- DOM-based Extraction (Fallback Strategy) ---
+# --- DOM-based Extraction (PRIMARY Strategy) ---
 
-async def extract_place_data_dom(page, url):
+async def extract_place_data_dom(page, lang="en"):
     """
     Extracts place data directly from the rendered DOM using Playwright.
-    This is a robust fallback strategy when JSON extraction fails.
+    This is the PRIMARY extraction method for Google Maps place pages.
     
-    CHANGE: Production-ready DOM extraction optimized for lead generation.
-    Uses multiple selector strategies and waits properly for page load.
-    Returns None if critical fields (name) cannot be extracted.
+    CHANGE: Complete rewrite using textContent and modern best practices.
+    - Uses textContent (not inner_text) to handle hidden elements
+    - Waits for h1 text to be populated with wait_for_function
+    - Uses stable data-item-id and aria-label selectors
+    - Returns empty dict if name cannot be extracted
     
     Args:
         page: Playwright page object (already navigated to place page)
-        url: The URL being scraped (used for maps_url)
+        lang: Language code for localized selectors
         
     Returns:
-        dict: Place details with required fields (name, maps_url) and optional fields
-              Returns None if name cannot be extracted
+        dict: Place details with at least name field, or empty dict if extraction fails
     """
     place_details = {}
     
     try:
-        # STEP 1: Wait for place page to fully load
-        print("DOM: Waiting for place page to load...")
+        # STEP 1: Wait for h1 to be attached
         try:
-            # CHANGE: Wait for h1 to be attached (not visible) since Google Maps hides some elements
-            # This fixes "locator resolved to hidden <h1>" timeout errors
-            await page.wait_for_selector('h1', state='attached', timeout=20000)
-            print("DOM: Page loaded (h1 attached)")
-        except Exception as e:
-            # Fallback: try role-based selector
+            await page.wait_for_selector('h1', state='attached', timeout=15000)
+        except Exception:
+            # Try role-based heading as fallback
             try:
                 await page.wait_for_selector('[role="heading"][aria-level="1"]', state='attached', timeout=10000)
-                print("DOM: Page loaded (heading role attached)")
-            except Exception:
-                print(f"DOM: Failed to detect page load: {e}")
-                return None
+            except Exception as e:
+                print(f"DOM: No heading element attached: {e}")
+                return {}
         
-        # Small pause for dynamic content
+        # STEP 2: Wait for h1 to have non-empty text content
         try:
-            await page.wait_for_load_state('networkidle', timeout=5000)
+            await page.wait_for_function(
+                "() => { const h1 = document.querySelector('h1'); return h1 && h1.textContent && h1.textContent.trim().length > 0; }",
+                timeout=15000
+            )
         except Exception:
-            pass  # Continue even if networkidle times out
+            # Try role-based heading
+            try:
+                await page.wait_for_function(
+                    "() => { const h = document.querySelector('[role=\"heading\"][aria-level=\"1\"]'); return h && h.textContent && h.textContent.trim().length > 0; }",
+                    timeout=10000
+                )
+            except Exception as e:
+                print(f"DOM: Heading text did not populate: {e}")
+                return {}
         
-        # STEP 2: Extract NAME (REQUIRED)
+        # STEP 3: Extract NAME (REQUIRED) using textContent
         name = None
         try:
-            # Strategy 1: Find h1 (even if hidden)
-            h1_elements = await page.locator('h1').all()
-            for h1 in h1_elements:
-                # CHANGE: Try inner_text first, fallback to text_content for hidden elements
-                try:
-                    text = await h1.inner_text()
-                except Exception:
-                    text = await h1.text_content()
-                
-                if text and text.strip() and len(text.strip()) > 2:
-                    name = text.strip()
-                    print(f"DOM: Extracted name: '{name}'")
-                    break
+            # Strategy 1: h1 textContent
+            name = await page.evaluate("() => document.querySelector('h1')?.textContent?.trim()")
             
-            # Strategy 2: Fallback to role-based heading
-            if not name:
-                heading_elements = await page.locator('[role="heading"][aria-level="1"]').all()
-                for heading in heading_elements:
-                    try:
-                        text = await heading.inner_text()
-                    except Exception:
-                        text = await heading.text_content()
-                    
-                    if text and text.strip() and len(text.strip()) > 2:
-                        name = text.strip()
-                        print(f"DOM: Extracted name (fallback): '{name}'")
-                        break
+            # Strategy 2: h1 span textContent (sometimes name is in nested span)
+            if not name or len(name) < 2:
+                name = await page.evaluate("() => document.querySelector('h1 span')?.textContent?.trim()")
+            
+            # Strategy 3: role-based heading
+            if not name or len(name) < 2:
+                name = await page.evaluate("() => document.querySelector('[role=\"heading\"][aria-level=\"1\"]')?.textContent?.trim()")
+            
+            if name and len(name) > 2:
+                place_details['name'] = name
+                print(f"DOM: ✓ Name: {name}")
+            else:
+                print(f"DOM: DIAGNOSTIC - h1 found but textContent empty or too short: '{name}'")
+                return {}
         except Exception as e:
             print(f"DOM: Error extracting name: {e}")
-        
-        # If no name found, this extraction failed
-        if not name:
-            print("DOM: CRITICAL - No name found, aborting extraction")
-            return None
-        
-        place_details['name'] = name
-        place_details['maps_url'] = url  # Store the normalized URL
-        
-        # STEP 3: Extract RATING and REVIEWS_COUNT
-        try:
-            # Look for rating patterns in the page
-            # Google Maps typically shows: "4.5★ · 1,234 reviews"
-            page_text = await page.content()
-            
-            # Find rating (float pattern near stars)
-            rating_patterns = [
-                r'(\d+\.\d+)\s*(?:stars?|★|⭐)',
-                r'aria-label="([^"]*?)(\d+\.\d+)\s*(?:stars?|out)',
-            ]
-            
-            for pattern in rating_patterns:
-                matches = re.findall(pattern, page_text, re.IGNORECASE)
-                if matches:
-                    try:
-                        # Extract first numeric match
-                        for match in matches:
-                            rating_str = match if isinstance(match, str) else match[-1]
-                            rating_str = re.search(r'\d+\.\d+', rating_str)
-                            if rating_str:
-                                rating = float(rating_str.group())
-                                if 0 <= rating <= 5:
-                                    place_details['rating'] = rating
-                                    print(f"DOM: Extracted rating: {rating}")
-                                    break
-                        if 'rating' in place_details:
-                            break
-                    except (ValueError, AttributeError):
-                        continue
-            
-            # Find reviews count (number followed by "reviews" or "review")
-            reviews_patterns = [
-                r'([\d,\.]+)\s*(?:reviews?|Bewertungen?)',
-                r'aria-label="[^"]*?([\d,\.]+)\s*reviews?',
-            ]
-            
-            for pattern in reviews_patterns:
-                matches = re.findall(pattern, page_text, re.IGNORECASE)
-                if matches:
-                    try:
-                        for match in matches:
-                            # Clean number (remove commas/dots used as thousands separators)
-                            reviews_str = str(match).replace(',', '').replace('.', '')
-                            # Keep only digits
-                            reviews_str = re.sub(r'\D', '', reviews_str)
-                            if reviews_str:
-                                reviews_count = int(reviews_str)
-                                if reviews_count > 0 and reviews_count < 10000000:  # Sanity check
-                                    place_details['reviews_count'] = reviews_count
-                                    print(f"DOM: Extracted reviews_count: {reviews_count}")
-                                    break
-                        if 'reviews_count' in place_details:
-                            break
-                    except (ValueError, AttributeError):
-                        continue
+            return {}
+            if name and len(name) > 2:
+                place_details['name'] = name
+                print(f"DOM: ✓ Name: {name}")
+            else:
+                print(f"DOM: DIAGNOSTIC - h1 found but textContent empty or too short: '{name}'")
+                return {}
         except Exception as e:
-            print(f"DOM: Error extracting rating/reviews: {e}")
+            print(f"DOM: Error extracting name: {e}")
+            return {}
         
         # STEP 4: Extract ADDRESS
         try:
-            # Strategy 1: Button with aria-label containing "Address"
-            address_selectors = [
-                'button[aria-label*="Address"]',
-                'button[data-item-id*="address"]',
-                '[data-item-id="address"]',
-                'button[aria-label*="address" i]',
-            ]
+            address = None
+            # Strategy 1: data-item-id="address"
+            address = await page.evaluate("() => document.querySelector('button[data-item-id=\"address\"]')?.textContent?.trim()")
+            if not address:
+                address = await page.evaluate("() => document.querySelector('div[data-item-id=\"address\"]')?.textContent?.trim()")
             
-            for selector in address_selectors:
-                elements = await page.locator(selector).all()
-                for element in elements:
-                    text = await element.inner_text()
-                    if text and len(text.strip()) > 5:  # Address should be reasonably long
-                        place_details['address'] = text.strip()
-                        print(f"DOM: Extracted address: '{text.strip()[:50]}...'")
-                        break
-                if 'address' in place_details:
-                    break
+            # Strategy 2: aria-label contains "Address"
+            if not address:
+                selectors = ['button[aria-label*="Address"]', 'button[aria-label*="Adresse"]']
+                for selector in selectors:
+                    try:
+                        address = await page.evaluate(f"() => document.querySelector('{selector}')?.textContent?.trim()")
+                        if address and len(address) > 5:
+                            break
+                    except Exception:
+                        pass
+            
+            if address and len(address) > 5:
+                place_details['address'] = address
+                print(f"DOM: ✓ Address")
         except Exception as e:
-            print(f"DOM: Error extracting address: {e}")
+            print(f"DOM: Address extraction failed: {e}")
         
         # STEP 5: Extract WEBSITE
         try:
-            # Strategy 1: Link with aria-label containing "Website"
-            website_selectors = [
-                'a[aria-label*="Website"]',
-                'a[data-item-id*="authority"]',
-                'a[data-tooltip*="Open website"]',
-            ]
+            website = None
+            # Strategy 1: data-item-id="authority"
+            website = await page.evaluate("() => document.querySelector('a[data-item-id=\"authority\"]')?.href")
             
-            for selector in website_selectors:
-                elements = await page.locator(selector).all()
-                for element in elements:
-                    href = await element.get_attribute('href')
-                    if href and 'http' in href and 'google.com' not in href and '/maps' not in href:
-                        place_details['website'] = href.strip()
-                        print(f"DOM: Extracted website: {href.strip()}")
-                        break
-                if 'website' in place_details:
-                    break
-            
-            # Strategy 2: Fallback - find any external link in the info area
-            if 'website' not in place_details:
-                all_links = await page.locator('a[href^="http"]').all()
-                for link in all_links[:30]:  # Check first 30 links
-                    href = await link.get_attribute('href')
-                    if href and 'http' in href and 'google.com' not in href and '/maps' not in href and 'gstatic.com' not in href:
-                        # Additional check: link should be visible (not hidden)
-                        is_visible = await link.is_visible()
-                        if is_visible:
-                            place_details['website'] = href.strip()
-                            print(f"DOM: Extracted website (fallback): {href.strip()}")
+            # Strategy 2: aria-label contains "Website"
+            if not website:
+                selectors = ['a[aria-label*="Website"]', 'a[aria-label*="website"]']
+                for selector in selectors:
+                    try:
+                        website = await page.evaluate(f"() => document.querySelector('{selector}')?.href")
+                        if website and 'http' in website and 'google.com' not in website:
                             break
+                    except Exception:
+                        pass
+            
+            # Strategy 3: Find first external link that's not google/maps
+            if not website:
+                website = await page.evaluate("""
+                    () => {
+                        const links = Array.from(document.querySelectorAll('a[href^="http"]'));
+                        for (const link of links) {
+                            const href = link.href;
+                            if (href && !href.includes('google.com') && !href.includes('/maps') && !href.includes('gstatic.com')) {
+                                return href;
+                            }
+                        }
+                        return null;
+                    }
+                """)
+            
+            if website and 'http' in website:
+                place_details['website'] = website
+                print(f"DOM: ✓ Website")
         except Exception as e:
-            print(f"DOM: Error extracting website: {e}")
+            print(f"DOM: Website extraction failed: {e}")
         
         # STEP 6: Extract PHONE
         try:
-            # Strategy 1: Button with aria-label containing "Phone"
-            phone_selectors = [
-                'button[aria-label*="Phone"]',
-                'button[data-item-id*="phone"]',
-                '[data-item-id="phone"]',
-                'button[aria-label*="phone" i]',
-            ]
+            phone = None
+            # Strategy 1: data-item-id="phone"
+            phone = await page.evaluate("() => document.querySelector('button[data-item-id=\"phone\"]')?.textContent?.trim()")
             
-            for selector in phone_selectors:
-                elements = await page.locator(selector).all()
-                for element in elements:
-                    text = await element.inner_text()
-                    if text:
-                        # Normalize: keep only digits and +
-                        phone_clean = re.sub(r'[^\d+]', '', text)
-                        if phone_clean and len(phone_clean) >= 7:  # Minimum viable phone length
-                            place_details['phone'] = phone_clean
-                            print(f"DOM: Extracted phone: {phone_clean}")
+            # Strategy 2: aria-label contains "Phone"
+            if not phone:
+                selectors = ['button[aria-label*="Phone"]', 'button[aria-label*="Telefon"]']
+                for selector in selectors:
+                    try:
+                        phone = await page.evaluate(f"() => document.querySelector('{selector}')?.textContent?.trim()")
+                        if phone:
                             break
-                if 'phone' in place_details:
-                    break
+                    except Exception:
+                        pass
+            
+            if phone:
+                # Normalize: keep only digits and +
+                phone_clean = re.sub(r'[^\d+]', '', phone)
+                if phone_clean and len(phone_clean) >= 7:
+                    place_details['phone'] = phone_clean
+                    print(f"DOM: ✓ Phone")
         except Exception as e:
-            print(f"DOM: Error extracting phone: {e}")
+            print(f"DOM: Phone extraction failed: {e}")
         
-        # Summary
-        extracted_fields = list(place_details.keys())
-        print(f"DOM: Extraction complete - {len(extracted_fields)} fields: {extracted_fields}")
+        # STEP 7: Extract RATING
+        try:
+            rating = await page.evaluate("""
+                () => {
+                    // Find elements with aria-label containing rating info
+                    const elements = Array.from(document.querySelectorAll('[aria-label]'));
+                    for (const el of elements) {
+                        const label = el.getAttribute('aria-label') || '';
+                        const match = label.match(/(\\d+[.,]\\d+)\\s*(?:stars?|Sterne)/i);
+                        if (match) {
+                            const rating = parseFloat(match[1].replace(',', '.'));
+                            if (rating >= 0 && rating <= 5) {
+                                return rating;
+                            }
+                        }
+                    }
+                    return null;
+                }
+            """)
+            if rating is not None:
+                place_details['rating'] = rating
+                print(f"DOM: ✓ Rating: {rating}")
+        except Exception as e:
+            print(f"DOM: Rating extraction failed: {e}")
         
+        # STEP 8: Extract REVIEWS_COUNT
+        try:
+            reviews_count = await page.evaluate("""
+                () => {
+                    const elements = Array.from(document.querySelectorAll('[aria-label]'));
+                    for (const el of elements) {
+                        const label = el.getAttribute('aria-label') || '';
+                        const match = label.match(/([\\d.,]+)\\s*(?:reviews?|Bewertungen?)/i);
+                        if (match) {
+                            const count = parseInt(match[1].replace(/[.,]/g, ''));
+                            if (count > 0 && count < 10000000) {
+                                return count;
+                            }
+                        }
+                    }
+                    return null;
+                }
+            """)
+            if reviews_count is not None:
+                place_details['reviews_count'] = reviews_count
+                print(f"DOM: ✓ Reviews: {reviews_count}")
+        except Exception as e:
+            print(f"DOM: Reviews extraction failed: {e}")
+        
+        print(f"DOM: Extracted {len(place_details)} fields")
         return place_details
         
     except Exception as e:
-        print(f"DOM: Critical error during extraction: {e}")
+        print(f"DOM: Critical error: {e}")
         import traceback
         traceback.print_exc()
-        return None
+        return {}
 
 
 # Example usage (for testing):
