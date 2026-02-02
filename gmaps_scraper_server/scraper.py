@@ -465,7 +465,8 @@ async def scrape_google_maps(query, max_places=None, lang="en", headless=True): 
                     # This strips /data= and query params that break JSON extraction
                     normalized_url = normalize_place_url(link, lang)
                     
-                    await page.goto(normalized_url, wait_until='domcontentloaded')
+                    # CHANGE: Use networkidle for better reliability with dynamic content
+                    await page.goto(normalized_url, wait_until='networkidle', timeout=30000)
                     
                     # Try JSON extraction first
                     html_content = await page.content()

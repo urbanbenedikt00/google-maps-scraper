@@ -350,28 +350,37 @@ async def extract_place_data_dom(page, url):
         # STEP 1: Wait for place page to fully load
         print("DOM: Waiting for place page to load...")
         try:
-            # Wait for the main heading to appear (primary indicator page is loaded)
-            await page.wait_for_selector('h1', state='visible', timeout=10000)
-            print("DOM: Page loaded (h1 found)")
+            # CHANGE: Wait for h1 to be attached (not visible) since Google Maps hides some elements
+            # This fixes "locator resolved to hidden <h1>" timeout errors
+            await page.wait_for_selector('h1', state='attached', timeout=20000)
+            print("DOM: Page loaded (h1 attached)")
         except Exception as e:
             # Fallback: try role-based selector
             try:
-                await page.wait_for_selector('[role="heading"][aria-level="1"]', state='visible', timeout=5000)
-                print("DOM: Page loaded (heading role found)")
+                await page.wait_for_selector('[role="heading"][aria-level="1"]', state='attached', timeout=10000)
+                print("DOM: Page loaded (heading role attached)")
             except Exception:
                 print(f"DOM: Failed to detect page load: {e}")
                 return None
         
         # Small pause for dynamic content
-        await page.wait_for_load_state('networkidle', timeout=5000)
+        try:
+            await page.wait_for_load_state('networkidle', timeout=5000)
+        except Exception:
+            pass  # Continue even if networkidle times out
         
         # STEP 2: Extract NAME (REQUIRED)
         name = None
         try:
-            # Strategy 1: Find h1
+            # Strategy 1: Find h1 (even if hidden)
             h1_elements = await page.locator('h1').all()
             for h1 in h1_elements:
-                text = await h1.inner_text()
+                # CHANGE: Try inner_text first, fallback to text_content for hidden elements
+                try:
+                    text = await h1.inner_text()
+                except Exception:
+                    text = await h1.text_content()
+                
                 if text and text.strip() and len(text.strip()) > 2:
                     name = text.strip()
                     print(f"DOM: Extracted name: '{name}'")
@@ -381,7 +390,11 @@ async def extract_place_data_dom(page, url):
             if not name:
                 heading_elements = await page.locator('[role="heading"][aria-level="1"]').all()
                 for heading in heading_elements:
-                    text = await heading.inner_text()
+                    try:
+                        text = await heading.inner_text()
+                    except Exception:
+                        text = await heading.text_content()
+                    
                     if text and text.strip() and len(text.strip()) > 2:
                         name = text.strip()
                         print(f"DOM: Extracted name (fallback): '{name}'")
