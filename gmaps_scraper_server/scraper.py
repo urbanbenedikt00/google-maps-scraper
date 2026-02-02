@@ -472,10 +472,38 @@ async def scrape_google_maps(query, max_places=None, lang="en", headless=True): 
                     html_content = await page.content() # Added await
                     place_data = extractor.extract_place_data(html_content)
 
-                    if place_data:
-                        place_data['link'] = link # Add the original source link
-                        results.append(place_data)
-                        # print(json.dumps(place_data, indent=2)) # Optional: print data as it's scraped
+                    # CHANGE: Fallback to DOM-based extraction if JSON extraction fails
+                    if not place_data or len(place_data) == 0:
+                        print(f"  - FALLBACK: DOM extraction for {normalized_url}")
+                        place_data = await extractor.extract_place_data_dom(page)
+
+                    if place_data and len(place_data) > 0:
+                        # Check if we have at least name or address (minimum viable data)
+                        if 'name' in place_data or 'address' in place_data:
+                            place_data['link'] = link # Add the original source link
+                            results.append(place_data)
+                            print(f"  - Successfully extracted data ({len(place_data)} fields)")
+                        else:
+                            print(f"  - Extracted data has no name or address, skipping")
+                            # Still save debug artifacts for this case
+                            if extraction_failures < 2:
+                                extraction_failures += 1
+                                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                failure_reason = f"extract_failed_{extraction_failures}"
+                                try:
+                                    screenshot_path = DEBUG_DIR / f"maps_debug_{timestamp}_{failure_reason}.png"
+                                    await page.screenshot(path=str(screenshot_path), full_page=True)
+                                    print(f"  - DEBUG: Screenshot saved to {screenshot_path}")
+                                    
+                                    html_path = DEBUG_DIR / f"maps_debug_{timestamp}_{failure_reason}.html"
+                                    Path(html_path).write_text(html_content, encoding='utf-8')
+                                    print(f"  - DEBUG: HTML saved to {html_path}")
+                                    
+                                    print(f"  - DEBUG: Original URL: {link}")
+                                    print(f"  - DEBUG: Normalized URL: {normalized_url}")
+                                    print(f"  - DEBUG: Final page URL: {page.url}")
+                                except Exception as debug_err:
+                                    print(f"  - ERROR: Failed to save extraction failure debug artifacts: {debug_err}")
                     else:
                         print(f"  - Failed to extract data for: {link}")
                         # CHANGE: Save debug artifacts for first 2 extraction failures only

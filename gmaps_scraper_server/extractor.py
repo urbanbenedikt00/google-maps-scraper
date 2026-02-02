@@ -324,6 +324,145 @@ def extract_place_data(html_content):
 
     return place_details if place_details else None
 
+
+# --- DOM-based Extraction (Fallback Strategy) ---
+
+async def extract_place_data_dom(page):
+    """
+    Extracts place data directly from the rendered DOM using Playwright.
+    This is a fallback strategy when JSON extraction fails.
+    
+    CHANGE: New function to provide robust DOM-based extraction.
+    Uses Playwright locators to extract data from visible elements.
+    
+    Args:
+        page: Playwright page object (already navigated to place page)
+        
+    Returns:
+        dict: Place details with keys: name, address, website, phone, rating, reviews_count
+              Missing fields are omitted (no None values included)
+    """
+    place_details = {}
+    
+    try:
+        # Extract name from h1
+        try:
+            name_element = page.locator('h1').first
+            if await name_element.count() > 0:
+                name = await name_element.inner_text()
+                if name and name.strip():
+                    place_details['name'] = name.strip()
+                    print(f"DOM: Extracted name: {name.strip()}")
+        except Exception as e:
+            print(f"DOM: Failed to extract name: {e}")
+        
+        # Extract address
+        try:
+            # Try button with data-item-id="address"
+            address_element = page.locator('button[data-item-id="address"]').first
+            if await address_element.count() == 0:
+                # Fallback to div
+                address_element = page.locator('div[data-item-id="address"]').first
+            
+            if await address_element.count() > 0:
+                address = await address_element.inner_text()
+                if address and address.strip():
+                    place_details['address'] = address.strip()
+                    print(f"DOM: Extracted address: {address.strip()}")
+        except Exception as e:
+            print(f"DOM: Failed to extract address: {e}")
+        
+        # Extract website
+        try:
+            # Try a[data-item-id="authority"]
+            website_element = page.locator('a[data-item-id="authority"]').first
+            if await website_element.count() > 0:
+                website = await website_element.get_attribute('href')
+                if website and website.strip():
+                    place_details['website'] = website.strip()
+                    print(f"DOM: Extracted website: {website.strip()}")
+            else:
+                # Fallback: search for any <a> that looks like a website in visible area
+                # Look for links that don't contain google.com or maps
+                all_links = await page.locator('a[href^="http"]').all()
+                for link in all_links[:20]:  # Check first 20 links only
+                    href = await link.get_attribute('href')
+                    if href and 'google.com' not in href and 'maps' not in href:
+                        place_details['website'] = href.strip()
+                        print(f"DOM: Extracted website (fallback): {href.strip()}")
+                        break
+        except Exception as e:
+            print(f"DOM: Failed to extract website: {e}")
+        
+        # Extract phone
+        try:
+            phone_element = page.locator('button[data-item-id="phone"]').first
+            if await phone_element.count() > 0:
+                phone_text = await phone_element.inner_text()
+                if phone_text and phone_text.strip():
+                    # Clean phone number (remove non-digits for standardization)
+                    phone_clean = re.sub(r'\D', '', phone_text)
+                    if phone_clean:
+                        place_details['phone'] = phone_clean
+                        print(f"DOM: Extracted phone: {phone_clean}")
+        except Exception as e:
+            print(f"DOM: Failed to extract phone: {e}")
+        
+        # Extract rating and reviews_count from aria-label
+        try:
+            # Look for elements with aria-label containing "stars" or "star"
+            rating_elements = await page.locator('[aria-label*="star"]').all()
+            for element in rating_elements:
+                aria_label = await element.get_attribute('aria-label')
+                if aria_label and 'star' in aria_label.lower():
+                    # Try to parse rating (e.g., "4.5 stars", "4,5 Sterne")
+                    rating_match = re.search(r'(\d+[.,]\d+|\d+)', aria_label)
+                    if rating_match:
+                        rating_str = rating_match.group(1).replace(',', '.')
+                        try:
+                            rating = float(rating_str)
+                            place_details['rating'] = rating
+                            print(f"DOM: Extracted rating: {rating}")
+                            break
+                        except ValueError:
+                            pass
+        except Exception as e:
+            print(f"DOM: Failed to extract rating: {e}")
+        
+        try:
+            # Look for elements with aria-label containing "review"
+            review_elements = await page.locator('[aria-label*="review"]').all()
+            for element in review_elements:
+                aria_label = await element.get_attribute('aria-label')
+                if aria_label and 'review' in aria_label.lower():
+                    # Try to parse review count (e.g., "1,234 reviews", "1.234 Bewertungen")
+                    # Remove commas and dots used as thousands separators
+                    review_match = re.search(r'([\d.,]+)\s*review', aria_label, re.IGNORECASE)
+                    if review_match:
+                        reviews_str = review_match.group(1).replace(',', '').replace('.', '')
+                        try:
+                            reviews_count = int(reviews_str)
+                            place_details['reviews_count'] = reviews_count
+                            print(f"DOM: Extracted reviews_count: {reviews_count}")
+                            break
+                        except ValueError:
+                            pass
+        except Exception as e:
+            print(f"DOM: Failed to extract reviews_count: {e}")
+        
+        # Log what was extracted
+        if place_details:
+            print(f"DOM: Successfully extracted {len(place_details)} fields")
+        else:
+            print("DOM: No fields could be extracted")
+        
+        return place_details if place_details else None
+        
+    except Exception as e:
+        print(f"DOM: Unexpected error during extraction: {e}")
+        return None
+
+
 # Example usage (for testing):
 if __name__ == '__main__':
     # Load sample HTML content from a file (replace 'sample_place.html' with your file)
