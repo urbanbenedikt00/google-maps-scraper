@@ -179,16 +179,11 @@ async def handle_consent_dialog(page):
     """
     Handles Google consent dialogs in both English and German.
     
-    CHANGE: Complete rewrite of consent handling logic.
-    - Uses proper Playwright locator API instead of incorrect XPath with wait_for_selector
+    CHANGE: Fixed deadlock issue - removed blocking networkidle waits.
+    - Uses proper Playwright locator API
     - Supports multiple consent button variants in EN and DE
-    - Uses text-based matching with case-insensitive partial matching
-    - Reliably clicks consent buttons using Playwright's auto-wait mechanisms
-    
-    Previous implementation issues:
-    - Used XPath strings directly with wait_for_selector (not supported)
-    - Only tried query_selector which doesn't auto-wait
-    - Had incomplete consent text matching
+    - Uses non-blocking wait strategy after clicking
+    - Always returns quickly to allow scraper to continue
     
     Args:
         page: Playwright page object
@@ -200,7 +195,6 @@ async def handle_consent_dialog(page):
         print("Checking for consent dialog...")
         
         # Define consent button texts in multiple languages
-        # These are common patterns found in Google's consent forms
         accept_texts = [
             "Accept all",
             "Alle akzeptieren",
@@ -218,20 +212,33 @@ async def handle_consent_dialog(page):
         # Try to find and click Accept button (preferred)
         for text in accept_texts:
             try:
-                # Use Playwright's text-based locator with case-insensitive matching
-                # This is more robust than XPath and handles nested elements correctly
                 button = page.get_by_role("button").filter(has_text=text)
                 if await button.count() > 0:
-                    print(f"Found consent button with text: '{text}' - clicking...")
+                    print(f"Found consent button: '{text}' - clicking...")
                     await button.first.click(timeout=5000)
-                    # Wait for navigation/dialog dismissal
-                    await page.wait_for_load_state('networkidle', timeout=8000)
-                    print("Consent accepted successfully")
+                    
+                    # CHANGE: Non-blocking wait strategy (no networkidle!)
+                    # Brief pause for UI to update
+                    await asyncio.sleep(0.8)
+                    
+                    # Optionally wait for consent button to disappear (with timeout)
+                    try:
+                        await button.first.wait_for(state='hidden', timeout=2000)
+                    except Exception:
+                        pass  # Continue even if button doesn't disappear
+                    
+                    # Optionally wait for feed to appear (with timeout)
+                    try:
+                        await page.wait_for_selector('[role="feed"]', state='attached', timeout=3000)
+                    except Exception:
+                        pass  # Continue even if feed doesn't appear yet
+                    
+                    print("Consent accepted")
                     return True
             except PlaywrightTimeoutError:
                 continue
             except Exception as e:
-                print(f"Error clicking accept button '{text}': {e}")
+                print(f"Error with accept button '{text}': {e}")
                 continue
         
         # If Accept not found, try Reject as fallback
@@ -239,15 +246,28 @@ async def handle_consent_dialog(page):
             try:
                 button = page.get_by_role("button").filter(has_text=text)
                 if await button.count() > 0:
-                    print(f"Found consent button with text: '{text}' - clicking...")
+                    print(f"Found consent button: '{text}' - clicking...")
                     await button.first.click(timeout=5000)
-                    await page.wait_for_load_state('networkidle', timeout=8000)
-                    print("Consent rejected successfully")
+                    
+                    # Non-blocking wait
+                    await asyncio.sleep(0.8)
+                    
+                    try:
+                        await button.first.wait_for(state='hidden', timeout=2000)
+                    except Exception:
+                        pass
+                    
+                    try:
+                        await page.wait_for_selector('[role="feed"]', state='attached', timeout=3000)
+                    except Exception:
+                        pass
+                    
+                    print("Consent rejected")
                     return True
             except PlaywrightTimeoutError:
                 continue
             except Exception as e:
-                print(f"Error clicking reject button '{text}': {e}")
+                print(f"Error with reject button '{text}': {e}")
                 continue
         
         print("No consent dialog detected")
