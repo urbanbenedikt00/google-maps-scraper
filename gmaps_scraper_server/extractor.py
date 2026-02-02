@@ -53,6 +53,13 @@ def parse_json_data(json_str):
     """
     Parses the extracted JSON string, handling the nested JSON string if present.
     Returns the main data blob (list) or None if parsing fails or structure is unexpected.
+    
+    CHANGE: Made more tolerant to string payloads in various formats.
+    Now handles:
+    - Direct list structure at [3][6]
+    - Prefixed JSON strings with ")]}'\n"
+    - Plain JSON strings starting with [ or {
+    - Fallback scanning for data blob when [6] doesn't work
     """
     if not json_str:
         return None
@@ -65,52 +72,118 @@ def parse_json_data(json_str):
 
              # Case 1: It's already the list we expect (older format?)
              if isinstance(data_blob_or_str, list):
-                 print("Found expected list structure directly at initial_data[3][6].")
+                 print("PARSE: Found expected list structure directly at initial_data[3][6].")
                  return data_blob_or_str
 
-             # Case 2: It's the string containing the actual JSON
-             elif isinstance(data_blob_or_str, str) and data_blob_or_str.startswith(")]}'\n"):
-                 print("Found string at initial_data[3][6], attempting to parse inner JSON.")
-                 try:
-                     json_str_inner = data_blob_or_str.split(")]}'\n", 1)[1]
-                     actual_data = json.loads(json_str_inner)
+             # Case 2: It's a string - handle various string formats
+             elif isinstance(data_blob_or_str, str):
+                 stripped_data = data_blob_or_str.strip()
+                 
+                 # Case 2a: Prefixed JSON string with ")]}'\n"
+                 if data_blob_or_str.startswith(")]}'\n"):
+                     print("PARSE: Found prefixed string (\\)]}'\n) at initial_data[3][6], attempting to parse inner JSON.")
+                     try:
+                         json_str_inner = data_blob_or_str.split(")]}'\n", 1)[1]
+                         actual_data = json.loads(json_str_inner)
 
-                     # Check if the parsed inner data is a list and has the expected sub-structure at index 6
-                     if isinstance(actual_data, list) and len(actual_data) > 6:
-                          potential_data_blob = safe_get(actual_data, 6)
-                          if isinstance(potential_data_blob, list):
-                              print("Returning data blob found at actual_data[6].")
-                              return potential_data_blob # This is the main data structure
-                          else:
-                              print(f"Data at actual_data[6] is not a list, but {type(potential_data_blob)}.")
-                              return None # Structure mismatch within inner data
-                     else:
-                         print(f"Parsed inner JSON is not a list or too short (len <= 6), type: {type(actual_data)}.")
-                         return None # Inner JSON structure not as expected
+                         # Check if the parsed inner data is a list and has the expected sub-structure at index 6
+                         if isinstance(actual_data, list) and len(actual_data) > 6:
+                              potential_data_blob = safe_get(actual_data, 6)
+                              if isinstance(potential_data_blob, list):
+                                  print("PARSE: Returning data blob found at actual_data[6].")
+                                  return potential_data_blob # This is the main data structure
+                              else:
+                                  print(f"PARSE: Data at actual_data[6] is not a list, but {type(potential_data_blob)}. Trying fallback scan.")
+                                  # Fallback: scan for first nested list that looks like data blob
+                                  return _scan_for_data_blob(actual_data)
+                         else:
+                             print(f"PARSE: Parsed inner JSON is not a list or too short (len <= 6), type: {type(actual_data)}. Trying fallback scan.")
+                             return _scan_for_data_blob(actual_data) if isinstance(actual_data, list) else None
 
-                 except json.JSONDecodeError as e_inner:
-                     print(f"Error decoding inner JSON string: {e_inner}")
+                     except json.JSONDecodeError as e_inner:
+                         print(f"PARSE ERROR: Failed to decode prefixed JSON string: {e_inner}")
+                         return None
+                     except Exception as e_inner_general:
+                         print(f"PARSE ERROR: Unexpected error processing prefixed JSON string: {e_inner_general}")
+                         return None
+                 
+                 # Case 2b: Plain JSON string starting with [ or {
+                 elif stripped_data.startswith('[') or stripped_data.startswith('{'):
+                     print("PARSE: Found plain JSON string at initial_data[3][6], attempting direct parse.")
+                     try:
+                         parsed_data = json.loads(stripped_data)
+                         
+                         # If it's a list, try to find the data blob
+                         if isinstance(parsed_data, list):
+                             if len(parsed_data) > 6 and isinstance(parsed_data[6], list):
+                                 print("PARSE: Found data blob at parsed_data[6].")
+                                 return parsed_data[6]
+                             else:
+                                 print("PARSE: parsed_data[6] not valid, trying fallback scan.")
+                                 return _scan_for_data_blob(parsed_data)
+                         else:
+                             print(f"PARSE: Plain JSON string parsed to {type(parsed_data)}, not a list. Cannot extract data blob.")
+                             return None
+                             
+                     except json.JSONDecodeError as e_direct:
+                         print(f"PARSE ERROR: Failed to decode plain JSON string: {e_direct}")
+                         return None
+                     except Exception as e_direct_general:
+                         print(f"PARSE ERROR: Unexpected error processing plain JSON string: {e_direct_general}")
+                         return None
+                 
+                 # Case 2c: String but not recognizable JSON format
+                 else:
+                     print(f"PARSE: String at [3][6] doesn't start with expected JSON markers. First 50 chars: {stripped_data[:50]}")
                      return None
-                 except Exception as e_inner_general:
-                     print(f"Unexpected error processing inner JSON string: {e_inner_general}")
-                     return None
 
-             # Case 3: Data at [3][6] is neither a list nor the expected string
+             # Case 3: Data at [3][6] is neither a list nor a string
              else:
-                 print(f"Parsed JSON structure unexpected at [3][6]. Expected list or prefixed JSON string, got {type(data_blob_or_str)}.")
-                 return None # Unexpected structure at [3][6]
+                 print(f"PARSE: Unexpected type at [3][6]: {type(data_blob_or_str)}.")
+                 return None
 
         # Case 4: Initial path [3][6] itself wasn't valid
         else:
-            print(f"Initial JSON structure not as expected (list[3][6] path not valid). Type: {type(initial_data)}")
-            return None # Initial structure invalid
+            print(f"PARSE: Initial JSON structure not as expected (list[3][6] path not valid). Type: {type(initial_data)}")
+            return None
 
     except json.JSONDecodeError as e:
-        print(f"Error decoding initial JSON: {e}")
+        print(f"PARSE ERROR: Failed to decode initial JSON: {e}")
         return None
     except Exception as e:
-        print(f"Unexpected error parsing JSON data: {e}")
+        print(f"PARSE ERROR: Unexpected error parsing JSON data: {e}")
         return None
+
+
+def _scan_for_data_blob(data_list):
+    """
+    Fallback function to scan a list for the first nested list that looks like a data blob.
+    The data blob is typically a large list containing place information.
+    
+    CHANGE: New helper function for tolerant parsing when expected index doesn't work.
+    
+    Args:
+        data_list: A list to scan for data blob structure
+        
+    Returns:
+        The first suitable data blob found, or None
+    """
+    if not isinstance(data_list, list):
+        return None
+    
+    print("PARSE: Scanning for data blob in list structure...")
+    
+    # Look for large nested lists (data blobs are typically large, 10+ elements)
+    for i, item in enumerate(data_list):
+        if isinstance(item, list) and len(item) >= 10:
+            # Additional heuristic: data blob usually contains nested structures
+            nested_count = sum(1 for x in item if isinstance(x, (list, dict)))
+            if nested_count >= 3:  # At least 3 nested structures
+                print(f"PARSE: Found potential data blob at index {i} (length: {len(item)}, nested: {nested_count})")
+                return item
+    
+    print("PARSE: No suitable data blob found in fallback scan.")
+    return None
 
 
 # --- Field Extraction Functions (Indices relative to the data_blob returned by parse_json_data) ---

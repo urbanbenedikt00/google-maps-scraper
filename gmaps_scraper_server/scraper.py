@@ -126,6 +126,55 @@ async def save_debug_artifacts(page, reason="unknown"):
         print(f"ERROR: Failed to save debug artifacts: {e}")
 
 
+def normalize_place_url(url, lang="en"):
+    """
+    Normalizes a Google Maps place URL by:
+    - Stripping everything starting at "/data=" (which changes the HTML payload)
+    - Removing query parameters except hl (language)
+    - Ensuring the final URL includes "?hl=<lang>"
+    
+    CHANGE: New function to fix extraction failures caused by non-canonical URLs.
+    Many collected links contain "/data=!4m10!..." which changes the page structure
+    and breaks the JSON extraction logic.
+    
+    Args:
+        url: Original Google Maps place URL
+        lang: Language code to ensure in the final URL
+        
+    Returns:
+        str: Normalized canonical place URL with only ?hl=<lang> parameter
+    """
+    try:
+        # Strip everything from /data= onwards (keep only /maps/place/<NAME>)
+        if "/data=" in url:
+            url = url.split("/data=")[0]
+            print(f"DEBUG: Stripped /data= portion from URL")
+        
+        # Parse URL to remove all query parameters
+        from urllib.parse import urlparse, urlunparse
+        parsed = urlparse(url)
+        
+        # Reconstruct URL without query parameters or fragments
+        clean_url = urlunparse((
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            '',  # params
+            '',  # query (will add back hl only)
+            ''   # fragment
+        ))
+        
+        # Add back only the language parameter
+        final_url = f"{clean_url}?hl={lang}"
+        print(f"DEBUG: Normalized URL: {final_url}")
+        return final_url
+        
+    except Exception as e:
+        print(f"ERROR: Failed to normalize URL {url}: {e}")
+        # Return original URL as fallback
+        return url
+
+
 async def handle_consent_dialog(page):
     """
     Handles Google consent dialogs in both English and German.
@@ -407,11 +456,16 @@ async def scrape_google_maps(query, max_places=None, lang="en", headless=True): 
             # --- Scraping Individual Places ---
             print(f"\nScraping details for {len(place_links)} places...")
             count = 0
+            extraction_failures = 0  # Track number of extraction failures for debug artifact limiting
             for link in place_links:
                 count += 1
                 print(f"Processing link {count}/{len(place_links)}: {link}") # Keep sync print
                 try:
-                    await page.goto(link, wait_until='domcontentloaded') # Added await
+                    # CHANGE: Normalize URL BEFORE visiting to ensure canonical page structure
+                    # This strips /data= and query params that break JSON extraction
+                    normalized_url = normalize_place_url(link, lang)
+                    
+                    await page.goto(normalized_url, wait_until='domcontentloaded') # Added await
                     # Wait a bit for dynamic content if needed, or wait for a specific element
                     # await page.wait_for_load_state('networkidle', timeout=10000) # Or networkidle if needed
 
@@ -419,14 +473,35 @@ async def scrape_google_maps(query, max_places=None, lang="en", headless=True): 
                     place_data = extractor.extract_place_data(html_content)
 
                     if place_data:
-                        place_data['link'] = link # Add the source link
+                        place_data['link'] = link # Add the original source link
                         results.append(place_data)
                         # print(json.dumps(place_data, indent=2)) # Optional: print data as it's scraped
                     else:
                         print(f"  - Failed to extract data for: {link}")
-                        # Optionally save the HTML for debugging
-                        # with open(f"error_page_{count}.html", "w", encoding="utf-8") as f:
-                        #     f.write(html_content)
+                        # CHANGE: Save debug artifacts for first 2 extraction failures only
+                        if extraction_failures < 2:
+                            extraction_failures += 1
+                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            failure_reason = f"extract_failed_{extraction_failures}"
+                            try:
+                                # Save screenshot
+                                screenshot_path = DEBUG_DIR / f"maps_debug_{timestamp}_{failure_reason}.png"
+                                await page.screenshot(path=str(screenshot_path), full_page=True)
+                                print(f"  - DEBUG: Screenshot saved to {screenshot_path}")
+                                
+                                # Save HTML
+                                html_path = DEBUG_DIR / f"maps_debug_{timestamp}_{failure_reason}.html"
+                                Path(html_path).write_text(html_content, encoding='utf-8')
+                                print(f"  - DEBUG: HTML saved to {html_path}")
+                                
+                                # Log URLs used
+                                print(f"  - DEBUG: Original URL: {link}")
+                                print(f"  - DEBUG: Normalized URL: {normalized_url}")
+                                print(f"  - DEBUG: Final page URL: {page.url}")
+                            except Exception as debug_err:
+                                print(f"  - ERROR: Failed to save extraction failure debug artifacts: {debug_err}")
+                        elif extraction_failures == 2:
+                            print(f"  - DEBUG: Skipping debug artifacts (already saved 2 failures)")
 
                 except PlaywrightTimeoutError:
                     print(f"  - Timeout navigating to or processing: {link}")
