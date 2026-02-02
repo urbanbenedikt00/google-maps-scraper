@@ -459,83 +459,68 @@ async def scrape_google_maps(query, max_places=None, lang="en", headless=True): 
             extraction_failures = 0  # Track number of extraction failures for debug artifact limiting
             for link in place_links:
                 count += 1
-                print(f"Processing link {count}/{len(place_links)}: {link}") # Keep sync print
+                print(f"\n[{count}/{len(place_links)}] Processing: {link}")
                 try:
                     # CHANGE: Normalize URL BEFORE visiting to ensure canonical page structure
                     # This strips /data= and query params that break JSON extraction
                     normalized_url = normalize_place_url(link, lang)
                     
-                    await page.goto(normalized_url, wait_until='domcontentloaded') # Added await
-                    # Wait a bit for dynamic content if needed, or wait for a specific element
-                    # await page.wait_for_load_state('networkidle', timeout=10000) # Or networkidle if needed
-
-                    html_content = await page.content() # Added await
+                    await page.goto(normalized_url, wait_until='domcontentloaded')
+                    
+                    # Try JSON extraction first
+                    html_content = await page.content()
                     place_data = extractor.extract_place_data(html_content)
 
                     # CHANGE: Fallback to DOM-based extraction if JSON extraction fails
                     if not place_data or len(place_data) == 0:
-                        print(f"  - FALLBACK: DOM extraction for {normalized_url}")
-                        place_data = await extractor.extract_place_data_dom(page)
+                        print(f"JSON extraction failed - trying DOM fallback...")
+                        place_data = await extractor.extract_place_data_dom(page, normalized_url)
 
+                    # Validate and append results
                     if place_data and len(place_data) > 0:
-                        # Check if we have at least name or address (minimum viable data)
-                        if 'name' in place_data or 'address' in place_data:
-                            place_data['link'] = link # Add the original source link
+                        # Check if we have at least name (minimum viable data for leads)
+                        if 'name' in place_data:
+                            place_data['link'] = link  # Add the original source link
                             results.append(place_data)
-                            print(f"  - Successfully extracted data ({len(place_data)} fields)")
+                            field_count = len(place_data)
+                            print(f"✓ Success: {field_count} fields extracted - {place_data.get('name', 'N/A')}")
                         else:
-                            print(f"  - Extracted data has no name or address, skipping")
-                            # Still save debug artifacts for this case
+                            print(f"✗ No name found - skipping place")
+                            # Save debug artifacts for places without name
                             if extraction_failures < 2:
                                 extraction_failures += 1
                                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                                failure_reason = f"extract_failed_{extraction_failures}"
+                                failure_reason = f"no_name_{extraction_failures}"
                                 try:
                                     screenshot_path = DEBUG_DIR / f"maps_debug_{timestamp}_{failure_reason}.png"
                                     await page.screenshot(path=str(screenshot_path), full_page=True)
-                                    print(f"  - DEBUG: Screenshot saved to {screenshot_path}")
-                                    
                                     html_path = DEBUG_DIR / f"maps_debug_{timestamp}_{failure_reason}.html"
                                     Path(html_path).write_text(html_content, encoding='utf-8')
-                                    print(f"  - DEBUG: HTML saved to {html_path}")
-                                    
-                                    print(f"  - DEBUG: Original URL: {link}")
-                                    print(f"  - DEBUG: Normalized URL: {normalized_url}")
-                                    print(f"  - DEBUG: Final page URL: {page.url}")
+                                    print(f"  Debug artifacts saved to {screenshot_path.name}")
                                 except Exception as debug_err:
-                                    print(f"  - ERROR: Failed to save extraction failure debug artifacts: {debug_err}")
+                                    print(f"  Failed to save debug artifacts: {debug_err}")
                     else:
-                        print(f"  - Failed to extract data for: {link}")
-                        # CHANGE: Save debug artifacts for first 2 extraction failures only
+                        print(f"✗ DOM extraction failed")
+                        # Save debug artifacts for failed extractions
                         if extraction_failures < 2:
                             extraction_failures += 1
                             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                             failure_reason = f"extract_failed_{extraction_failures}"
                             try:
-                                # Save screenshot
                                 screenshot_path = DEBUG_DIR / f"maps_debug_{timestamp}_{failure_reason}.png"
                                 await page.screenshot(path=str(screenshot_path), full_page=True)
-                                print(f"  - DEBUG: Screenshot saved to {screenshot_path}")
-                                
-                                # Save HTML
                                 html_path = DEBUG_DIR / f"maps_debug_{timestamp}_{failure_reason}.html"
                                 Path(html_path).write_text(html_content, encoding='utf-8')
-                                print(f"  - DEBUG: HTML saved to {html_path}")
-                                
-                                # Log URLs used
-                                print(f"  - DEBUG: Original URL: {link}")
-                                print(f"  - DEBUG: Normalized URL: {normalized_url}")
-                                print(f"  - DEBUG: Final page URL: {page.url}")
+                                print(f"  Debug artifacts saved to {screenshot_path.name}")
                             except Exception as debug_err:
-                                print(f"  - ERROR: Failed to save extraction failure debug artifacts: {debug_err}")
-                        elif extraction_failures == 2:
-                            print(f"  - DEBUG: Skipping debug artifacts (already saved 2 failures)")
+                                print(f"  Failed to save debug artifacts: {debug_err}")
 
                 except PlaywrightTimeoutError:
-                    print(f"  - Timeout navigating to or processing: {link}")
+                    print(f"✗ Timeout navigating to: {link}")
                 except Exception as e:
-                    print(f"  - Error processing {link}: {e}")
-                await asyncio.sleep(0.5) # Changed to asyncio.sleep, added await
+                    print(f"✗ Error processing {link}: {e}")
+                
+                await asyncio.sleep(0.5)
 
             await browser.close() # Added await
 
