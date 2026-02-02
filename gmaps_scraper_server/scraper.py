@@ -472,67 +472,70 @@ async def scrape_google_maps(query, max_places=None, lang="en", headless=True): 
             extraction_failures = 0  # Track number of extraction failures for debug artifact limiting
             for link in place_links:
                 count += 1
-                print(f"\n[{count}/{len(place_links)}] Processing: {link}")
+                print(f"\n[{count}/{len(place_links)}] {link}")
+                
                 try:
                     # CHANGE: Normalize URL BEFORE visiting to ensure canonical page structure
-                    # This strips /data= and query params that break JSON extraction
                     normalized_url = normalize_place_url(link, lang)
+                    print(f"  → Normalized: {normalized_url}")
                     
-                    # CHANGE: Use networkidle for better reliability with dynamic content
-                    await page.goto(normalized_url, wait_until='networkidle', timeout=30000)
+                    # CHANGE: Navigate with retry logic and proper timeout
+                    navigation_success = False
+                    for attempt in range(2):  # Try twice
+                        try:
+                            # Use domcontentloaded (NOT networkidle) - Google Maps keeps network busy
+                            await page.goto(normalized_url, wait_until='domcontentloaded', timeout=45000)
+                            navigation_success = True
+                            break
+                        except PlaywrightTimeoutError as timeout_err:
+                            if attempt == 0:
+                                print(f"  ⚠ Navigation timeout, retrying...")
+                                await asyncio.sleep(1)
+                            else:
+                                print(f"  ✗ Navigation failed after retry")
+                                raise timeout_err
                     
-                    # Try JSON extraction first
-                    html_content = await page.content()
-                    place_data = extractor.extract_place_data(html_content)
-
-                    # CHANGE: Fallback to DOM-based extraction if JSON extraction fails
+                    if not navigation_success:
+                        continue
+                    
+                    # CHANGE: Primary extraction method is now DOM-based
+                    place_data = await extractor.extract_place_data_dom(page, lang)
+                    
+                    # Optional: Try JSON extraction as fallback if DOM returns empty
                     if not place_data or len(place_data) == 0:
-                        print(f"JSON extraction failed - trying DOM fallback...")
-                        place_data = await extractor.extract_place_data_dom(page, normalized_url)
+                        print(f"  DOM extraction returned empty, trying JSON fallback...")
+                        html_content = await page.content()
+                        place_data = extractor.extract_place_data(html_content)
+                        if place_data and len(place_data) > 0:
+                            print(f"  JSON fallback succeeded")
 
                     # Validate and append results
-                    if place_data and len(place_data) > 0:
-                        # Check if we have at least name (minimum viable data for leads)
-                        if 'name' in place_data:
-                            place_data['link'] = link  # Add the original source link
-                            results.append(place_data)
-                            field_count = len(place_data)
-                            print(f"✓ Success: {field_count} fields extracted - {place_data.get('name', 'N/A')}")
-                        else:
-                            print(f"✗ No name found - skipping place")
-                            # Save debug artifacts for places without name
-                            if extraction_failures < 2:
-                                extraction_failures += 1
-                                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                                failure_reason = f"no_name_{extraction_failures}"
-                                try:
-                                    screenshot_path = DEBUG_DIR / f"maps_debug_{timestamp}_{failure_reason}.png"
-                                    await page.screenshot(path=str(screenshot_path), full_page=True)
-                                    html_path = DEBUG_DIR / f"maps_debug_{timestamp}_{failure_reason}.html"
-                                    Path(html_path).write_text(html_content, encoding='utf-8')
-                                    print(f"  Debug artifacts saved to {screenshot_path.name}")
-                                except Exception as debug_err:
-                                    print(f"  Failed to save debug artifacts: {debug_err}")
+                    if place_data and 'name' in place_data:
+                        place_data['link'] = normalized_url
+                        results.append(place_data)
+                        print(f"  ✓ {place_data['name']} ({len(place_data)} fields)")
                     else:
-                        print(f"✗ DOM extraction failed")
-                        # Save debug artifacts for failed extractions
+                        print(f"  ✗ No data extracted")
+                        
+                        # Save debug artifacts for first 2 failures only
                         if extraction_failures < 2:
                             extraction_failures += 1
                             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                             failure_reason = f"extract_failed_{extraction_failures}"
                             try:
+                                html_content = await page.content()
                                 screenshot_path = DEBUG_DIR / f"maps_debug_{timestamp}_{failure_reason}.png"
                                 await page.screenshot(path=str(screenshot_path), full_page=True)
                                 html_path = DEBUG_DIR / f"maps_debug_{timestamp}_{failure_reason}.html"
                                 Path(html_path).write_text(html_content, encoding='utf-8')
-                                print(f"  Debug artifacts saved to {screenshot_path.name}")
+                                print(f"  Debug saved: {screenshot_path.name}")
                             except Exception as debug_err:
-                                print(f"  Failed to save debug artifacts: {debug_err}")
+                                print(f"  Debug save failed: {debug_err}")
 
                 except PlaywrightTimeoutError:
-                    print(f"✗ Timeout navigating to: {link}")
+                    print(f"  ✗ Timeout")
                 except Exception as e:
-                    print(f"✗ Error processing {link}: {e}")
+                    print(f"  ✗ Error: {e}")
                 
                 await asyncio.sleep(0.5)
 
